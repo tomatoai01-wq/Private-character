@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>캐릭터 뷰어</title>
+<style>
+  :root {
+    --bg: #eceef1; --panel: rgba(255,255,255,.88); --text: #1d2229; --muted: #6b7380;
+    --accent: #2f6fed; --accent-text: #fff; --border: rgba(0,0,0,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181c; --panel: rgba(32,35,41,.9); --text: #e9ecf1; --muted: #9aa3b0;
+            --accent: #5b8cff; --accent-text: #fff; --border: rgba(255,255,255,.08); }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif; }
+  #view { position: fixed; inset: 0; touch-action: none; }
+  #view canvas { display: block; width: 100%; height: 100%; }
+
+  .bar { position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: calc(14px + env(safe-area-inset-bottom)); width: min(560px, calc(100% - 24px));
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    padding: 10px; display: flex; flex-direction: column; gap: 8px;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); box-shadow: 0 6px 24px rgba(0,0,0,.12); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .seg { display: flex; flex: 1; background: var(--border); border-radius: 11px; padding: 3px; }
+  .seg button { flex: 1; }
+  button { font: inherit; font-size: 15px; font-weight: 600; border: 0; border-radius: 9px;
+    padding: 10px 8px; min-height: 42px; background: transparent; color: var(--text); cursor: pointer; }
+  button.on { background: var(--accent); color: var(--accent-text); }
+  button.icon { flex: 0 0 46px; background: var(--border); }
+  button:disabled { opacity: .4; }
+  input[type=range] { flex: 1; accent-color: var(--accent); height: 28px; }
+  .time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 74px; text-align: right; }
+  #anim-row.hidden { display: none; }
+
+  .top { position: fixed; top: calc(12px + env(safe-area-inset-top)); right: 12px; display: flex; gap: 6px; }
+  .chip { font-size: 13px; font-weight: 600; padding: 7px 11px; min-height: 0; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+  .title { position: fixed; top: calc(14px + env(safe-area-inset-top)); left: 14px; font-size: 15px; font-weight: 700;
+    max-width: calc(100% - 230px); }
+  .title small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  #loader { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; background: var(--bg); transition: opacity .3s; z-index: 10; }
+  #loader.done { opacity: 0; pointer-events: none; }
+  .prog { width: 200px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .prog i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+  #loader p { margin: 0; font-size: 14px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="view"></div>
+
+<div class="title">캐릭터 뷰어<small>드래그: 회전 · 두 손가락: 확대/이동</small></div>
+<div class="top">
+  <button class="chip" id="btn-quality" title="화질 전환">화질: -</button>
+  <button class="chip" id="btn-reset" title="시점 초기화">시점 초기화</button>
+</div>
+
+<div class="bar">
+  <div class="row">
+    <div class="seg">
+      <button id="btn-pose" class="on">기본 포즈</button>
+      <button id="btn-anim">애니메이션</button>
+    </div>
+  </div>
+  <div class="row" id="anim-row">
+    <button class="icon" id="btn-play" aria-label="재생/일시정지">❚❚</button>
+    <input type="range" id="seek" min="0" max="1000" value="0" aria-label="재생 위치">
+    <button class="chip" id="btn-speed" style="min-width:52px">1x</button>
+    <span class="time" id="time">0.0 / 0.0s</span>
+  </div>
+</div>
+
+<div id="loader"><div class="prog"><i id="prog"></i></div><p id="loader-text">모델 불러오는 중…</p></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ---------- 기기 성능 판단 (저사양이면 가벼운 모델 + 낮은 해상도) ----------
+const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && innerWidth < 1024);
+const lowMem = (navigator.deviceMemory || 8) <= 4 || (navigator.hardwareConcurrency || 8) <= 4;
+const params = new URLSearchParams(location.search);
+let quality = params.get('q') || (isMobile || lowMem ? 'lq' : 'hq');
+const MODELS = { hq: 'models/character_hq.glb', lq: 'models/character_lq.glb' };
+const ANIM_URL = 'models/animation1.glb';
+
+// ---------- 렌더러 ----------
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: quality === 'hq', powerPreference: 'low-power' });
+const maxDPR = quality === 'hq' ? 2 : 1.5;
+renderer.setPixelRatio(Math.min(devicePixelRatio, maxDPR));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+view.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#eceef1');
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.7;
+pmrem.dispose();
+const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(1.5, 3, 2.5); scene.add(key);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 0.6));
+
+// 바닥 원형 그림자 (실시간 그림자 없이 가볍게)
+const shadowTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'); const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(0,0,0,.35)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(c);
+})();
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false }));
+floor.rotation.x = -Math.PI / 2; scene.add(floor);
+
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.05, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.minDistance = 0.3; controls.maxDistance = 10;
+controls.target.set(0, 0.95, 0);
+
+function resetView() {
+  const h = 1.75, fov = THREE.MathUtils.degToRad(camera.fov);
+  const fitH = h / (2 * Math.tan(fov / 2)) * 1.25;
+  const aspect = innerHeight > 0 ? innerWidth / innerHeight : 1;
+  camera.aspect = aspect; camera.updateProjectionMatrix();
+  const fitW = fitH * Math.max(1, 0.75 / aspect); // 세로 화면에서도 전신이 보이도록
+  // 하단 조작 바에 발이 가리지 않도록 화면 중심을 살짝 아래로
+  controls.target.set(0, 0.78, 0);
+  camera.position.set(0, 0.9, Math.max(fitH, fitW));
+  controls.update();
+}
+
+// ---------- 로딩 ----------
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const progEl = document.getElementById('prog'), loaderEl = document.getElementById('loader'), loaderText = document.getElementById('loader-text');
+function load(url, onPct) {
+  return new Promise((res, rej) => loader.load(url, res, e => e.total && onPct(e.loaded / e.total), rej));
+}
+
+let model = null, mixer = null, action = null, clip = null, mode = 'pose', speedIdx = 0;
+const skinned = [];
+const SPEEDS = [1, 0.5, 0.25, 2];
+
+const restPose = []; // 로드 직후 뼈 위치(바인드 포즈) 저장 → '기본 포즈'로 복원할 때 사용
+function prepare(root) {
+  restPose.length = 0;
+  root.traverse(o => { if (o.isBone) restPose.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()]); });
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    o.frustumCulled = false; // 애니메이션 중 사라짐 방지
+    if (o.isSkinnedMesh) skinned.push(o);
+    // 눈 그림자/눈물선 오버레이는 전용 셰이더가 없으면 얼룩처럼 보여서 숨김
+    if (/EyeOcclusion|TearLine/i.test(o.name)) { o.visible = false; return; }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      m.vertexColors = false;
+      const n = m.name || '';
+      if (/hair|Default|Eyelash/i.test(n) && m.map) {
+        // 머리카락/속눈썹: 알파 테스트로 정렬 문제 없이 가볍게
+        m.transparent = false; m.alphaTest = 0.15; m.depthWrite = true; m.side = THREE.DoubleSide;
+        m.metalness = 0; m.metalnessMap = null; m.roughness = 0.65; m.envMapIntensity = 0.5;
+      }
+      if (/Cornea/i.test(n)) { m.transparent = true; m.opacity = 0.0; m.depthWrite = false; }
+      m.needsUpdate = true;
+    }
+  });
+}
+
+async function loadCharacter() {
+  loaderEl.classList.remove('done'); progEl.style.width = '0%';
+  loaderText.textContent = quality === 'hq' ? '고화질 모델 불러오는 중…' : '가벼운 모델 불러오는 중…';
+  const [gltf, animGltf] = await Promise.all([
+    load(MODELS[quality], p => progEl.style.width = (p * 90) + '%'),
+    clip ? Promise.resolve(null) : load(ANIM_URL, () => {}),
+  ]);
+  if (model) { scene.remove(model); model.traverse(o => { if (o.isMesh) { o.geometry.dispose(); [].concat(o.material).forEach(m => { for (const k in m) if (m[k]?.isTexture) m[k].dispose(); m.dispose(); }); } }); }
+  skinned.length = 0;
+  model = gltf.scene; prepare(model); scene.add(model);
+  if (animGltf) clip = animGltf.animations[0];
+  mixer = new THREE.AnimationMixer(model);
+  action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopRepeat);
+  setMode(mode);
+  document.getElementById('btn-quality').textContent = '화질: ' + (quality === 'hq' ? '고화질' : '가벼움');
+  progEl.style.width = '100%';
+  loaderEl.classList.add('done');
+  window.viewer = { scene, camera, model, clip, renderer, controls };
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+const btnPose = $('btn-pose'), btnAnim = $('btn-anim'), btnPlay = $('btn-play'), seek = $('seek'), timeEl = $('time'), animRow = $('anim-row');
+let seeking = false;
+
+function setMode(m) {
+  mode = m;
+  btnPose.classList.toggle('on', m === 'pose'); btnAnim.classList.toggle('on', m === 'anim');
+  animRow.classList.toggle('hidden', m !== 'anim');
+  if (m === 'pose') {
+    action.stop();
+    for (const [b, p, q, s] of restPose) { b.position.copy(p); b.quaternion.copy(q); b.scale.copy(s); }
+  } else {
+    action.reset().play(); action.paused = false;
+  }
+  updatePlayIcon();
+}
+function updatePlayIcon() { btnPlay.textContent = action && action.paused ? '▶' : '❚❚'; }
+
+btnPose.onclick = () => setMode('pose');
+btnAnim.onclick = () => setMode('anim');
+btnPlay.onclick = () => { action.paused = !action.paused; updatePlayIcon(); };
+$('btn-speed').onclick = e => { speedIdx = (speedIdx + 1) % SPEEDS.length; mixer.timeScale = SPEEDS[speedIdx]; e.target.textContent = SPEEDS[speedIdx] + 'x'; };
+seek.addEventListener('pointerdown', () => seeking = true);
+seek.addEventListener('pointerup', () => seeking = false);
+seek.addEventListener('input', () => { action.time = seek.value / 1000 * clip.duration; mixer.update(0); });
+$('btn-reset').onclick = resetView;
+$('btn-quality').onclick = () => { quality = quality === 'hq' ? 'lq' : 'hq'; loadCharacter(); };
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- 루프 (탭이 안 보이면 자동 정지 → 배터리 절약) ----------
+const clock = new THREE.Clock();
+let frame = 0;
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (mixer && mode === 'anim') {
+    mixer.update(dt);
+    if (!seeking && (frame++ % 4 === 0)) {
+      seek.value = Math.round(action.time / clip.duration * 1000);
+      timeEl.textContent = action.time.toFixed(1) + ' / ' + clip.duration.toFixed(1) + 's';
+    }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+resetView();
+loadCharacter().catch(err => { loaderText.textContent = '불러오기 실패: ' + err.message; console.error(err); });
+</script>
+</body>
+</html>

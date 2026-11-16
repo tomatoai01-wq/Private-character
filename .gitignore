@@ -1,0 +1,4 @@
+# 원본 FBX/텍스처는 용량이 커서 제외 (viewer/models 에 변환본만 올림)
+iCloneExport_FBX/
+.claude/
+*.blend1
